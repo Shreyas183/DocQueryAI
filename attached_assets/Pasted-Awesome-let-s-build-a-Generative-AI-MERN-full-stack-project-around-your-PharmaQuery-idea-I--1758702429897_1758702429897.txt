@@ -1,0 +1,428 @@
+Awesome — let’s build a **Generative-AI + MERN full-stack project** around your PharmaQuery idea. I’ll give you a complete, ready-to-implement blueprint: architecture, tech choices, folder structure, key code snippets (backend + frontend), vector-store options, deployment notes, and next steps so you can start coding immediately.
+
+I’ll assume:
+
+* MERN = **MongoDB, Express, React, Node**
+* Gen-AI provider = **OpenAI (or swap in Google Gemini / others later)** — you can easily switch providers where I use the term “embedding / LLM API”.
+* Vector store = **Pinecone** (hosted) or **Chroma** (local/embedded) or **MongoDB Atlas Vector Search** — I’ll show code for Pinecone + fallback suggestion for chorma/mongo.
+
+---
+
+# 1) High-level architecture
+
+* **Frontend (React)**: upload PDFs, ask queries (NLP chat UI), show sources & highlighted excerpts.
+* **Backend (Node + Express)**: file upload, PDF parsing, text splitting, embedding creation, vector DB indexing, query & retrieval, LLM prompt orchestration.
+* **DB**: MongoDB for metadata (document records, users, audit logs). Vector DB (Pinecone / Chroma / MongoDB Atlas vector search) for similarity search.
+* **GenAI**: Embeddings + chat completions from an LLM API (OpenAI / Gemini).
+* **Optional**: authentication (JWT), admin UI, analytics.
+
+Flow:
+
+1. Upload PDF → backend parses → split into chunks → embeddings → store (vector DB) + metadata in Mongo.
+2. User query → backend creates embedding for query → vector DB similarity search → retrieve top chunks → compose prompt + call LLM → return answer + list of supporting chunks (with doc links/pages).
+
+---
+
+# 2) Tech stack & reasons
+
+* Frontend: **React** (Vite or Create React App), **TailwindCSS** for quick UI, optionally **React Query** for data fetching.
+* Backend: **Node 18+**, **Express**, **multer** (file upload), **pdf-parse** or **pdfjs-dist** to extract text, **langchainjs** (optional) for orchestration.
+* DB: **MongoDB Atlas** (metadata + user data).
+* Vector DB: **Pinecone** (hosted, scalable) or **Chroma** (open source/local), or **MongoDB Atlas Vector Search** (if you want fewer services).
+* GenAI: **OpenAI** (embeddings & chat) — can be swapped easily.
+* Dev tools: **Docker**, **GitHub Actions** for CI/CD, **Vercel** for frontend and **Render/Heroku** for backend, or deploy entire stack on AWS/GCP.
+
+---
+
+# 3) Project structure (root)
+
+```
+pharmaquery/
+├─ backend/
+│  ├─ src/
+│  │  ├─ controllers/
+│  │  │  ├─ uploadController.js
+│  │  │  ├─ queryController.js
+│  │  ├─ services/
+│  │  │  ├─ pdfService.js
+│  │  │  ├─ embedService.js
+│  │  │  ├─ vectorService.js
+│  │  ├─ routes/
+│  │  │  ├─ upload.js
+│  │  │  ├─ query.js
+│  │  ├─ models/
+│  │  │  ├─ Document.js
+│  │  ├─ app.js
+│  │  ├─ server.js
+│  ├─ package.json
+│  ├─ Dockerfile
+├─ frontend/
+│  ├─ src/
+│  │  ├─ components/
+│  │  │  ├─ UploadPanel.jsx
+│  │  │  ├─ QueryPanel.jsx
+│  │  │  ├─ ChatUI.jsx
+│  │  ├─ App.jsx
+│  ├─ package.json
+│  ├─ vite.config.js
+├─ infra/
+│  ├─ docker-compose.yml
+├─ README.md
+```
+
+---
+
+# 4) Environment variables (.env)
+
+```
+PORT=8080
+MONGO_URI=<your_mongo_connection_string>
+OPENAI_API_KEY=<your_openai_api_key>
+PINECONE_API_KEY=<your_pinecone_key>
+PINECONE_ENVIRONMENT=<pinecone-env>
+PINECONE_INDEX=<index-name>
+FRONTEND_URL=http://localhost:3000
+JWT_SECRET=supersecret
+```
+
+---
+
+# 5) Key backend snippets
+
+Below are minimal-but-functional examples you can paste and run (adapt as required).
+
+### `backend/src/app.js`
+
+```js
+import express from "express";
+import cors from "cors";
+import uploadRouter from "./routes/upload.js";
+import queryRouter from "./routes/query.js";
+
+const app = express();
+app.use(cors({ origin: process.env.FRONTEND_URL || "*" }));
+app.use(express.json());
+app.use("/api/upload", uploadRouter);
+app.use("/api/query", queryRouter);
+
+export default app;
+```
+
+### `backend/src/server.js`
+
+```js
+import "dotenv/config";
+import mongoose from "mongoose";
+import app from "./app.js";
+
+const PORT = process.env.PORT || 8080;
+const MONGO_URI = process.env.MONGO_URI;
+
+mongoose.connect(MONGO_URI)
+  .then(() => {
+    console.log("Mongo connected");
+    app.listen(PORT, () => console.log(`Server running: ${PORT}`));
+  })
+  .catch(err => console.error("Mongo connection error", err));
+```
+
+### `backend/src/services/pdfService.js` (parse PDF → text)
+
+```js
+import fs from "fs";
+import pdfParse from "pdf-parse";
+
+export async function extractTextFromPdf(filePath) {
+  const dataBuffer = fs.readFileSync(filePath);
+  const data = await pdfParse(dataBuffer);
+  // data.text contains the whole text; you may use smarter page-level splitting
+  return data.text;
+}
+```
+
+### `backend/src/services/embedService.js` (uses OpenAI embeddings)
+
+```js
+import OpenAI from "openai";
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+export async function getEmbedding(text) {
+  const res = await openai.embeddings.create({
+    model: "text-embedding-3-small", // example; choose desired model
+    input: text,
+  });
+  return res.data[0].embedding;
+}
+```
+
+### `backend/src/services/vectorService.js` (Pinecone example)
+
+```js
+import { PineconeClient } from "@pinecone-database/pinecone";
+
+const pinecone = new PineconeClient();
+await pinecone.init({
+  apiKey: process.env.PINECONE_API_KEY,
+  environment: process.env.PINECONE_ENVIRONMENT,
+});
+const index = pinecone.Index(process.env.PINECONE_INDEX);
+
+export async function upsertVectors(vectors) {
+  // vectors: [{ id, values: embeddingArray, metadata: {...} }, ...]
+  await index.upsert({ upsertRequest: { vectors } });
+}
+
+export async function querySimilar(embedding, topK = 5) {
+  const queryResponse = await index.query({
+    vector: embedding,
+    topK,
+    includeMetadata: true,
+    includeValues: false,
+  });
+  return queryResponse.matches;
+}
+```
+
+### `backend/src/routes/upload.js`
+
+```js
+import express from "express";
+import multer from "multer";
+import { extractTextFromPdf } from "../services/pdfService.js";
+import { getEmbedding } from "../services/embedService.js";
+import { upsertVectors } from "../services/vectorService.js";
+import Document from "../models/Document.js";
+import fs from "fs/promises";
+
+const router = express.Router();
+const upload = multer({ dest: "uploads/" });
+
+router.post("/", upload.single("file"), async (req, res) => {
+  try {
+    const filePath = req.file.path;
+    const text = await extractTextFromPdf(filePath);
+    // naive splitter - split into ~1000 char chunks
+    const chunks = text.match(/[\s\S]{1,1000}/g) || [];
+    const vectors = [];
+    for (let i = 0; i < chunks.length; i++) {
+      const emb = await getEmbedding(chunks[i]);
+      vectors.push({
+        id: `${req.file.filename}_chunk_${i}`,
+        values: emb,
+        metadata: { docName: req.file.originalname, chunkIndex: i, text: chunks[i].slice(0, 400) }
+      });
+    }
+    await upsertVectors(vectors);
+    // save doc metadata
+    const doc = await Document.create({ filename: req.file.originalname, chunksCount: chunks.length });
+    await fs.unlink(filePath); // remove uploaded file
+    res.json({ ok: true, doc });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+export default router;
+```
+
+### `backend/src/routes/query.js`
+
+```js
+import express from "express";
+import { getEmbedding } from "../services/embedService.js";
+import { querySimilar } from "../services/vectorService.js";
+import OpenAI from "openai";
+
+const router = express.Router();
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+router.post("/", async (req, res) => {
+  try {
+    const { query } = req.body;
+    const qEmb = await getEmbedding(query);
+    const matches = await querySimilar(qEmb, 5);
+    const contextText = matches.map(m => m.metadata.text).join("\n\n---\n\n");
+    // Create a prompt
+    const prompt = `You are PharmaQuery assistant. Use the supporting context to answer the question concisely, and list source chunks. Context:\n\n${contextText}\n\nQUESTION: ${query}\n\nAnswer:`;
+    const chatRes = await openai.chat.completions.create({
+      model: "gpt-4o-mini", // example - pick the model you want
+      messages: [{ role: "user", content: prompt }],
+      max_tokens: 700
+    });
+    const answer = chatRes.choices[0].message.content;
+    res.json({ answer, sources: matches.map(m => m.metadata) });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+export default router;
+```
+
+> Note: replace model names with ones available to your account. Swapping to Google Gemini involves changing the API client calls only.
+
+---
+
+# 6) Frontend (React) snippets
+
+### `frontend/src/App.jsx`
+
+```jsx
+import React from "react";
+import UploadPanel from "./components/UploadPanel";
+import QueryPanel from "./components/QueryPanel";
+
+export default function App() {
+  return (
+    <div className="p-6 max-w-5xl mx-auto">
+      <h1 className="text-3xl font-bold mb-4">PharmaQuery</h1>
+      <UploadPanel />
+      <div className="my-6" />
+      <QueryPanel />
+    </div>
+  );
+}
+```
+
+### `frontend/src/components/UploadPanel.jsx`
+
+```jsx
+import React, { useState } from "react";
+import axios from "axios";
+
+export default function UploadPanel(){
+  const [file, setFile] = useState(null);
+  const [status, setStatus] = useState("");
+
+  async function handleUpload(e) {
+    e.preventDefault();
+    if (!file) return;
+    const fd = new FormData();
+    fd.append("file", file);
+    setStatus("Uploading...");
+    const res = await axios.post(`${import.meta.env.VITE_API_URL}/api/upload`, fd);
+    setStatus(res.data.ok ? "Uploaded" : "Error");
+  }
+
+  return (
+    <section>
+      <h2 className="text-xl font-semibold">Upload Research Paper</h2>
+      <form onSubmit={handleUpload} className="mt-3">
+        <input type="file" onChange={e => setFile(e.target.files[0])} />
+        <button className="ml-3 px-4 py-2 bg-blue-600 text-white rounded">Upload</button>
+      </form>
+      <p className="mt-2">{status}</p>
+    </section>
+  );
+}
+```
+
+### `frontend/src/components/QueryPanel.jsx`
+
+```jsx
+import React, { useState } from "react";
+import axios from "axios";
+
+export default function QueryPanel(){
+  const [q, setQ] = useState("");
+  const [ans, setAns] = useState(null);
+
+  async function submitQ(e) {
+    e.preventDefault();
+    const res = await axios.post(`${import.meta.env.VITE_API_URL}/api/query`, { query: q });
+    setAns(res.data);
+  }
+
+  return (
+    <section>
+      <h2 className="text-xl font-semibold">Ask a question</h2>
+      <form onSubmit={submitQ} className="mt-3">
+        <input value={q} onChange={e => setQ(e.target.value)} placeholder="e.g. What are adverse effects of drug X?" className="w-full p-2 border" />
+        <button className="mt-2 px-4 py-2 bg-green-600 text-white rounded">Ask</button>
+      </form>
+      {ans && (
+        <div className="mt-4 p-4 border rounded">
+          <h3 className="font-bold">Answer</h3>
+          <p>{ans.answer}</p>
+          <h4 className="mt-2 font-semibold">Sources</h4>
+          <ul>
+            {ans.sources.map((s, i) => <li key={i}>{s.docName} — chunk {s.chunkIndex}</li>)}
+          </ul>
+        </div>
+      )}
+    </section>
+  )
+}
+```
+
+---
+
+# 7) Vector store options & tradeoffs
+
+* **Pinecone**: easy, scalable, hosted. Good for production. (paid).
+* **Chroma**: open-source, simple local dev, but memory/ops management needed for production.
+* **MongoDB Atlas Vector Search**: fewer moving parts (same provider for metadata + vector). Newer – check limits/pricing.
+  Choose Pinecone for production; Chroma for dev/testing.
+
+---
+
+# 8) Auth, rate limiting, and safety
+
+* Add **JWT auth** for user accounts (register/login).
+* Rate-limit endpoints (express-rate-limit).
+* Sanitize extracted text (PII removal) if needed (especially in pharma domain).
+* Add an LLM safety layer: moderation API on user queries, and add “source listing” and “confidence” flags in responses.
+
+---
+
+# 9) Testing, CI/CD & deployment
+
+* **Unit tests**: Jest (backend), React Testing Library (frontend).
+* **Docker**: Dockerfile for backend & compose for optional Chroma/Mongo.
+* **CI**: GitHub Actions to run tests, lint, build.
+* **Deploy**:
+
+  * Frontend → Vercel (or Netlify).
+  * Backend → Render / Fly / Heroku / DigitalOcean App Platform.
+  * Pinecone → hosted; MongoDB Atlas for DB.
+* Add monitoring: Sentry, Prometheus/Grafana for metrics.
+
+---
+
+# 10) Roadmap / MVP timeline (suggested milestones)
+
+* **MVP (1–2 weeks)**:
+
+  * Backend: file upload, pdf parsing, embedding & store in Chroma or Pinecone.
+  * Query endpoint returns LLM answer with sources.
+  * Frontend: upload + query UI.
+* **v1 (2–4 weeks)**:
+
+  * Authentication, admin UI, better chunking (page-aware), caching.
+  * Improve prompt engineering (system messages + answer traceability).
+* **v2 (4–8 weeks)**:
+
+  * Document versioning, exportable citations, analytics, multi-model switcher, enterprise read-only APIs.
+
+---
+
+# 11) Security & compliance (important for pharma)
+
+* Secure API keys in environment.
+* Use HTTPS everywhere.
+* If dealing with PHI or controlled research data, consider HIPAA/other compliance, data residency — minimize storing raw files if not needed.
+
+---
+
+# 12) Next steps — which I can do for you right now
+
+Pick one and I’ll generate the code/files in this chat:
+
+1. **Full starter repo**: I generate `backend` and `frontend` files for the MVP (upload + query) ready to paste into your project.
+2. **Docker compose** + dev env for local testing with Chroma + Mongo.
+3. **Complete README + deployment guide** (Vercel + Render + Pinecone + Mongo Atlas).
+4. **Implement advanced splitting & retrieval** using LangChain patterns and evaluation test scripts.
+
+Tell me which one you want me to produce first (I’ll create full files and code snippets you can copy). If you want, I’ll generate the entire starter repo (option 1) right away.
